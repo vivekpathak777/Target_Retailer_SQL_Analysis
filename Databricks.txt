@@ -1,0 +1,327 @@
+-- 1. How many total orders, customers, sellers, AND products are in the dataset?
+SELECT COUNT(DISTINCT order_id) FROM orders;
+SELECT COUNT(DISTINCT customer_id) FROM customers;
+SELECT COUNT(DISTINCT seller_id) FROM sellers;
+SELECT COUNT(DISTINCT product_id) FROM products;
+
+-- 2. What is the date range of orders.order_purchase_timestamp (min and max)?
+SELECT
+  MAX(order_purchase_timestamp) AS latest,
+  MIN(order_purchase_timestamp) AS oldest
+FROM orders;
+
+-- 3. What is the distribution of order_status across all orders?
+SELECT
+  order_status,
+  COUNT(order_id) AS distribution,
+  format_string('%.2f%%',
+    ROUND(
+      COUNT(order_id) / (SELECT COUNT(DISTINCT order_id) FROM orders) * 100, 2
+    )
+  ) AS percentage
+FROM orders
+GROUP BY order_status
+ORDER BY distribution DESC;
+
+-- 4. How many orders per month over the full time span?
+WITH cte AS (
+  SELECT
+    COUNT(order_id) AS Total_orders,
+    year(order_purchase_timestamp) AS year,
+    month(order_purchase_timestamp) AS month
+  FROM orders
+  GROUP BY year(order_purchase_timestamp), month(order_purchase_timestamp)
+)
+SELECT
+  cte.Total_orders,
+  CONCAT(CAST(cte.year AS STRING), '-', CAST(cte.month AS STRING)) AS month
+FROM cte;
+
+-- 5. How many DISTINCT customers by state, ranked by count?
+SELECT
+  customer_state AS states,
+  COUNT(DISTINCT customer_id) AS no_of_customers
+FROM customers
+GROUP BY customer_state
+ORDER BY no_of_customers DESC;
+
+-- 6. Which 10 cities have the most delivered orders?
+SELECT
+  customer_city,
+  COUNT(customer_city) AS counts
+FROM customers c
+INNER JOIN orders o
+  ON o.customer_id = c.customer_id
+WHERE order_status = 'delivered'
+GROUP BY customer_city
+ORDER BY counts DESC
+LIMIT 10;
+
+-- 7. What is the average number of items per order (from order_items)?
+SELECT
+  order_id,
+  AVG(order_item_id) AS avg_items_per_order
+FROM order_items
+GROUP BY order_id;
+
+-- 8. Average item total (sum price per order), average freight per order, and their ratio?
+SELECT
+  order_id,
+  SUM(price) AS total_price_per_order,
+  AVG(freight_value) AS avg_freight_value
+FROM order_items
+GROUP BY order_id
+ORDER BY total_price_per_order DESC;
+
+-- 9. For each payments.payment_type, share of orders, avg payment_value, and avg installments?
+SELECT
+  payment_type,
+  format_string('%.1f%%',
+    ROUND(
+      COUNT(o.order_id) / (SELECT COUNT(order_id) FROM orders) * 100, 1
+    )
+  ) AS tot_order,
+  ROUND(AVG(payment_value), 2) AS PV,
+  ROUND(AVG(payment_installments), 2) AS PI
+FROM orders o
+INNER JOIN payments p
+  ON o.order_id = p.order_id
+GROUP BY payment_type
+ORDER BY tot_order DESC;
+
+-- 10. For each customer state, avg item price and avg freight_value (based on items in their orders)?
+SELECT
+  customer_state,
+  ROUND(AVG(price), 1) AS avg_price,
+  ROUND(AVG(freight_value), 1) AS avg_freight_value
+FROM order_items i
+INNER JOIN orders o
+  ON o.order_id = i.order_id
+INNER JOIN customers c
+  ON c.customer_id = o.customer_id
+GROUP BY customer_state
+ORDER BY avg_price DESC;
+
+-- 11. For each state, average delivery time and ranking of fastest/slowest?
+WITH cte AS (
+  SELECT
+    customer_state,
+    ROUND(AVG(datediff(order_delivered_customer_date, order_purchase_timestamp)), 2) AS avg_delivery_time
+  FROM customers c
+  INNER JOIN orders o
+    ON o.customer_id = c.customer_id
+  WHERE order_status = 'delivered'
+  GROUP BY customer_state
+)
+SELECT
+  customer_state,
+  avg_delivery_time,
+  DENSE_RANK() OVER (ORDER BY avg_delivery_time DESC) AS slowest,
+  DENSE_RANK() OVER (ORDER BY avg_delivery_time) AS fastest
+FROM cte
+ORDER BY avg_delivery_time;
+
+-- 12. Share of delivered orders that were early, on time, and late vs. order_estimated_delivery_date?
+WITH cte_12 AS (
+  SELECT
+    order_id,
+    order_status,
+    order_estimated_delivery_date,
+    order_delivered_carrier_date,
+    datediff(order_estimated_delivery_date, order_delivered_carrier_date) AS diff,
+    CASE
+      WHEN datediff(order_estimated_delivery_date, order_delivered_carrier_date) < 0 THEN 'early'
+      WHEN datediff(order_estimated_delivery_date, order_delivered_carrier_date) > 0 THEN 'late'
+      ELSE 'on_time'
+    END AS dev_status
+  FROM orders
+  WHERE order_delivered_carrier_date IS NOT NULL
+    AND order_delivered_customer_date IS NOT NULL
+    AND order_status = 'delivered'
+)
+SELECT
+  dev_status,
+  ROUND(
+    COUNT(order_id) / (SELECT COUNT(*) FROM cte_12) * 100, 2
+  ) AS cc
+FROM cte_12
+GROUP BY dev_status;
+
+-- 13. For each product category: total revenue, avg review score, and number of DISTINCT sellers.
+SELECT
+  `product category`,
+  ROUND(SUM(price * order_item_id), 2) AS revenue,
+  ROUND(AVG(review_score), 2) AS avg_score,
+  COUNT(DISTINCT s.seller_id) AS sellers
+FROM products p
+JOIN order_items oi
+  ON p.product_id = oi.product_id
+JOIN orders o
+  ON o.order_id = oi.order_id
+JOIN order_reviews orr
+  ON orr.order_id = o.order_id
+JOIN sellers s
+  ON s.seller_id = oi.seller_id
+WHERE `product category` IS NOT NULL
+GROUP BY `product category`
+ORDER BY revenue DESC;
+
+-- 14. For each seller, how many orders they fulfilled and avg freight per item?
+SELECT
+  s.seller_id,
+  COUNT(order_status) AS total_orders,
+  ROUND(AVG(freight_value), 2) AS avg_freight_value
+FROM sellers s
+JOIN order_items oi
+  ON oi.seller_id = s.seller_id
+JOIN orders o
+  ON o.order_id = oi.order_id
+WHERE order_status = 'delivered'
+GROUP BY s.seller_id
+ORDER BY total_orders DESC;
+
+-- 15. Monthly revenue and the month-over-month growth for each calendar month.
+WITH cte_15 AS (
+  SELECT
+    date_trunc('month', order_purchase_timestamp) AS year_month,
+    ROUND(SUM(price * order_item_id), 2) AS revenue
+  FROM order_items oi
+  JOIN orders o
+    ON o.order_id = oi.order_id
+  WHERE o.order_id IS NOT NULL
+  GROUP BY date_trunc('month', order_purchase_timestamp)
+)
+SELECT
+  cte_15.year_month,
+  revenue,
+  format_string('%.1f%%',
+    ROUND(((revenue / LAG(cte_15.revenue) OVER (ORDER BY year_month)) - 1) * 100, 1)
+  ) AS MOM_chg
+FROM cte_15;
+
+-- 16a. Percentage of customers who made 2+ orders.
+WITH cte_16 AS (
+  SELECT c.customer_unique_id, COUNT(order_id) AS no_of_orders
+  FROM customers c
+  JOIN orders o ON o.customer_id = c.customer_id
+  GROUP BY c.customer_unique_id
+  HAVING no_of_orders > 2
+)
+SELECT format_string('%.2f%%',
+         ROUND(
+           COUNT(cte_16.customer_unique_id) /
+           (SELECT COUNT(customer_unique_id) FROM customers) * 100, 2
+         )
+       ) AS repeat_customers
+FROM cte_16;
+
+-- 16b. Repeat rate by state.
+WITH cte_16 AS (
+  SELECT c.customer_unique_id, COUNT(order_id) AS no_of_orders
+  FROM customers c
+  JOIN orders o ON o.customer_id = c.customer_id
+  GROUP BY c.customer_unique_id
+  HAVING no_of_orders > 2
+)
+SELECT
+  customer_state,
+  format_string('%.2f%%',
+    ROUND(
+      COUNT(cte_16.customer_unique_id) /
+      (SELECT COUNT(customer_unique_id) FROM customers) * 100, 2
+    )
+  ) AS repeat_customers
+FROM cte_16
+JOIN customers c
+  ON c.customer_unique_id = cte_16.customer_unique_id
+GROUP BY customer_state
+ORDER BY repeat_customers DESC;
+
+-- 17. Using geolocation... (kept joins as-is per your request)
+SELECT oi.order_id, c.customer_id, s.seller_id
+FROM orders o
+JOIN customers c ON c.customer_id = o.customer_id
+JOIN order_items oi ON oi.order_id = o.order_id
+JOIN sellers s ON s.seller_id = oi.order_id;
+
+SELECT oi.order_id, s.seller_id
+FROM order_items oi
+JOIN sellers s ON s.seller_id = oi.order_id;
+
+-- 18. Cancellation/unavailability rate by state.
+WITH cte_18 AS (
+  SELECT
+    customer_state,
+    COUNT(order_status) AS total_orders,
+    count_if(o.order_status = 'canceled') AS canceled,
+    count_if(o.order_status = 'unavailable') AS unavailable
+  FROM orders o
+  JOIN customers c ON o.customer_id = c.customer_id
+  GROUP BY customer_state
+)
+SELECT
+  *,
+  format_string('%.2f%%', ROUND((canceled / total_orders) * 100, 2)) AS cancel_order_shares,
+  format_string('%.2f%%', ROUND((unavailable / total_orders) * 100, 2)) AS unavailable_order_shares
+FROM cte_18
+ORDER BY cancel_order_shares DESC;
+
+-- 19. Long-tail product categories (bottom 20% of revenue).
+WITH cte_19 AS (
+  SELECT `product category`, ROUND(SUM(price * order_item_id), 2) AS Revenue
+  FROM products p
+  JOIN order_items oi ON p.product_id = oi.product_id
+  WHERE `product category` IS NOT NULL
+  GROUP BY `product category`
+)
+SELECT `product category` AS bottom_cat, cte_19.Revenue
+FROM cte_19
+WHERE Revenue < (SELECT AVG((cte_19.Revenue) * 0.2) FROM cte_19)
+ORDER BY cte_19.Revenue DESC;
+
+-- 20. Rolling 3-month moving average of orders and MoM change
+
+WITH all_dates AS (
+  SELECT explode(sequence(to_date('2016-09-01'), to_date('2018-11-01'), interval 1 month)) AS d
+),
+cte_20_1 AS (
+  SELECT to_date(order_purchase_timestamp) AS dd, customer_state, COUNT(order_id) AS C_orders
+  FROM customers c
+  JOIN orders o ON c.customer_id = o.customer_id
+  GROUP BY to_date(order_purchase_timestamp), customer_state
+),
+cte_20_main AS (
+  SELECT date_trunc('month', dd) AS dates, customer_state, SUM(C_orders) AS tot_orders
+  FROM cte_20_1
+  GROUP BY date_trunc('month', dd), customer_state
+),
+cte_20_f AS (
+  SELECT a.d AS dates, customer_state, tot_orders
+  FROM all_dates a
+  LEFT JOIN cte_20_main m ON a.d = m.dates
+),
+cte_20_MOM AS (
+  SELECT
+    customer_state,
+    dates,
+    tot_orders,
+    LAG(tot_orders) OVER (PARTITION BY customer_state ORDER BY dates) AS prev_month_orders,
+    ROUND(((tot_orders / LAG(tot_orders) OVER (PARTITION BY customer_state ORDER BY dates)) - 1) * 100, 2) AS MOM_change_per_state
+  FROM cte_20_f
+  WHERE customer_state IS NOT NULL
+)
+SELECT
+  cte_20_MOM.customer_state,
+  cte_20_MOM.dates,
+  cte_20_MOM.tot_orders,
+  MOM_change_per_state,
+  format_string('%.0f%%',
+    ROUND(
+      AVG(MOM_change_per_state) OVER (
+        PARTITION BY customer_state ORDER BY cte_20_MOM.dates ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+      ), 2
+    )
+  ) AS _3MOavg_per_chg
+FROM cte_20_MOM
+ORDER BY cte_20_MOM.customer_state, cte_20_MOM.dates;
+
